@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>RTX Multiplayer - Final Fix</title>
+    <style>
+        body { margin: 0; overflow: hidden; touch-action: none; background: #000; font-family: sans-serif; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 100; }
+        .interactive { pointer-events: auto; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 20px; height: 20px; transform: translate(-50%, -50%); pointer-events: none; z-index: 30; border: 2px solid rgba(0, 255, 0, 0.7); border-radius: 50%; }
+        #scoreboard { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 10px 20px; border-radius: 10px; font-weight: bold; border: 1px solid #555; }
+        #pc-mode-btn { position: absolute; top: 20px; left: 20px; padding: 8px 15px; background: #2196F3; color: white; border-radius: 5px; cursor: pointer; border: none; font-size: 11px; }
+        #health-wrap { position: absolute; top: 65px; left: 20px; width: 150px; height: 12px; background: rgba(0,0,0,0.5); border: 1px solid white; }
+        #health-bar { width: 100%; height: 100%; background: #ff3333; transition: width 0.3s; }
+        .btn { position: absolute; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; border: 2px solid #fff; user-select: none; z-index: 20; cursor: pointer; }
+        #fire-button { bottom: 50px; right: 40px; width: 90px; height: 90px; border-radius: 50%; background: radial-gradient(circle, #ff4b2b, #ff416c); }
+        #view-button { top: 20px; right: 20px; width: 60px; height: 35px; border-radius: 5px; background: rgba(0,0,0,0.6); font-size: 12px; }
+        #crouch-button { bottom: 50px; left: 180px; width: 75px; height: 75px; border-radius: 50%; background: rgba(50,50,50,0.8); font-size: 12px; }
+        #look-zone { position: absolute; top: 0; right: 0; width: 65%; height: 100%; z-index: 5; }
+        .pc-active .mobile-ui { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="scoreboard">X Takımı: <span id="scoreX">0</span> | Y Takımı: <span id="scoreY">0</span></div>
+        <button id="pc-mode-btn" class="interactive">PC MODE</button>
+        <div id="health-wrap"><div id="health-bar"></div></div>
+        <div id="crosshair"></div>
+        <div id="look-zone" class="mobile-ui interactive"></div>
+        <div id="joystick-zone" class="mobile-ui interactive" style="position: absolute; bottom: 30px; left: 30px; width: 120px; height: 120px;"></div>
+        <div id="fire-button" class="btn mobile-ui interactive">ATEŞ</div>
+        <div id="view-button" class="btn mobile-ui interactive">TPP</div>
+        <div id="crouch-button" class="btn mobile-ui interactive">EĞİL</div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/23.1.1/tween.umd.js"></script>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+                "firebase/database": "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { initializeApp } from "firebase/app";
+        import { getDatabase, ref, set, onValue, update, remove, onDisconnect, onChildRemoved } from "firebase/database";
+
+        // --- FIREBASE AYARLARI ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAviUa6Y1qGq8cCucmBBTjDp5G843dtHxQ",
+            authDomain: "server-c374c.firebaseapp.com",
+            databaseURL: "https://server-c374c-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "server-c374c",
+            storageBucket: "server-c374c.firebasestorage.app",
+            messagingSenderId: "578270419082",
+            appId: "1:578270419082:web:0d2b9d0f25d54d0bc4b573"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        const myId = "p_" + Math.floor(Math.random() * 90000 + 10000);
+        const myTeam = Math.random() > 0.5 ? 'X' : 'Y';
+        let myHealth = 100;
+
+        // --- SAHNE KURULUMU ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.FogExp2(0x87CEEB, 0.01);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.toneMapping = THREE.ReinhardToneMapping;
+        document.body.appendChild(renderer.domElement);
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.4, 0.4, 0.85));
+
+        // Texturelar
+        const texLoader = new THREE.TextureLoader();
+        const cimTex = texLoader.load('cim.png');
+        cimTex.wrapS = cimTex.wrapT = THREE.RepeatWrapping; cimTex.repeat.set(100, 100);
+        const duvarTex = texLoader.load('duvar.png');
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+        sun.position.set(30, 60, 30); sun.castShadow = true;
+        scene.add(sun);
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), new THREE.MeshStandardMaterial({ map: cimTex }));
+        floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true;
+        scene.add(floor);
+
+        const walls = [];
+        function createWall(x, z, w, h, d) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ map: duvarTex }));
+            mesh.position.set(x, h/2, z); mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh); walls.push(new THREE.Box3().setFromObject(mesh));
+        }
+        createWall(0, -30, 60, 10, 2); createWall(-30, 0, 2, 10, 60);
+
+        // --- OYUNCU ---
+        const player = new THREE.Group(); 
+        scene.add(player);
+        const camPivot = new THREE.Group(); 
+        camPivot.position.y = 1.7; 
+        player.add(camPivot); 
+        camPivot.add(camera);
+        
+        const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.2), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+        body.position.y = 0.6; body.castShadow = true; player.add(body);
+
+        let weapon;
+        new GLTFLoader().load('Gun.glb', (gltf) => {
+            weapon = gltf.scene; 
+            camPivot.add(weapon);
+            weapon.position.set(0.4, -0.3, -0.7); 
+            weapon.scale.set(0.15, 0.15, 0.15); 
+            weapon.rotation.y = -Math.PI / 2;
+        });
+
+        // --- MULTIPLAYER VE KLON FIX ---
+        const others = {};
+        const playersRef = ref(db, 'players');
+        const myRef = ref(db, 'players/' + myId);
+
+        // ÖNEMLİ: Sekme kapandığında veya yenilendiğinde veriyi siler
+        onDisconnect(myRef).remove();
+
+        function sync() {
+            // NaN Kontrolü: Eğer rotasyon veya pozisyon sayı değilse Firebase'e gönderme
+            if(isNaN(player.rotation.y) || isNaN(player.position.x)) return;
+
+            update(myRef, {
+                pos: [player.position.x, player.position.y, player.position.z],
+                rotY: player.rotation.y,
+                team: myTeam,
+                health: myHealth,
+                isCrouching: isCrouching
+            }).catch(e => console.error("Sync Error:", e));
+        }
+
+        onValue(playersRef, (snap) => {
+            const data = snap.val(); if(!data) return;
+            for(let id in data) {
+                if(id === myId) continue;
+                if(!others[id]) {
+                    others[id] = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.2), new THREE.MeshStandardMaterial({ color: data[id].team === 'X' ? 0xff4444 : 0x4444ff }));
+                    scene.add(others[id]);
+                }
+                if(data[id].pos) others[id].position.set(data[id].pos[0], data[id].pos[1], data[id].pos[2]);
+                others[id].rotation.y = data[id].rotY || 0;
+                others[id].scale.y = data[id].isCrouching ? 0.6 : 1.0;
+            }
+        });
+
+        onChildRemoved(playersRef, (snap) => {
+            const id = snap.key;
+            if(others[id]) { scene.remove(others[id]); delete others[id]; }
+        });
+
+        // --- KONTROLLER ---
+        let isCrouching = false, isTPP = false, isPC = false, lastX = 0, lastY = 0, moveVec = { x: 0, y: 0 };
+        const keys = {};
+
+        function toggleCrouch() { 
+            isCrouching = !isCrouching; 
+            new TWEEN.Tween(camPivot.position).to({ y: isCrouching ? 0.9 : 1.7 }, 200).start(); 
+        }
+        function toggleView() { 
+            isTPP = !isTPP; 
+            new TWEEN.Tween(camera.position).to(isTPP ? { z: 4, y: 0.5, x: 0.8 } : { z: 0, y: 0, x: 0 }, 400).start(); 
+        }
+
+        document.getElementById('pc-mode-btn').onclick = (e) => { 
+            e.stopPropagation();
+            isPC = true; 
+            document.body.classList.add('pc-active'); 
+            renderer.domElement.requestPointerLock(); 
+        };
+
+        window.onkeydown = (e) => { keys[e.code] = true; if(e.code === 'KeyC') toggleCrouch(); if(e.code === 'KeyV') toggleView(); };
+        window.onkeyup = (e) => keys[e.code] = false;
+
+        window.onmousemove = (e) => { 
+            if(isPC) { 
+                player.rotation.y -= e.movementX * 0.002; 
+                camPivot.rotation.x = Math.max(-1.4, Math.min(1.4, camPivot.rotation.x - e.movementY * 0.002)); 
+            } 
+        };
+
+        document.getElementById('look-zone').ontouchstart = (e) => { lastX = e.touches[0].pageX; lastY = e.touches[0].pageY; };
+        document.getElementById('look-zone').ontouchmove = (e) => {
+            const dx = e.touches[0].pageX - lastX; const dy = e.touches[0].pageY - lastY;
+            player.rotation.y -= dx * 0.005; 
+            camPivot.rotation.x = Math.max(-1.4, Math.min(1.4, camPivot.rotation.x - dy * 0.005));
+            lastX = e.touches[0].pageX; lastY = e.touches[0].pageY;
+        };
+
+        const joystick = nipplejs.create({ zone: document.getElementById('joystick-zone'), mode: 'static', position: { left: '60px', bottom: '60px' } });
+        joystick.on('move', (e, d) => { moveVec = d.vector; });
+        joystick.on('end', () => { moveVec = { x: 0, y: 0 }; });
+
+        document.getElementById('fire-button').ontouchstart = (e) => { e.preventDefault(); if(weapon) new TWEEN.Tween(weapon.position).to({ z: -0.6 }, 50).yoyo(true).repeat(1).start(); };
+        document.getElementById('crouch-button').ontouchstart = (e) => { e.preventDefault(); toggleCrouch(); };
+        document.getElementById('view-button').ontouchstart = (e) => { e.preventDefault(); toggleView(); };
+
+        // --- ANA DÖNGÜ ---
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta(); 
+            TWEEN.update();
+
+            const speed = isCrouching ? 4 : 9;
+            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+            const side = new THREE.Vector3(1, 0, 0).applyQuaternion(player.quaternion);
+
+            const oldPos = player.position.clone();
+            if (isPC) {
+                if (keys['KeyW']) player.position.addScaledVector(dir, speed * dt);
+                if (keys['KeyS']) player.position.addScaledVector(dir, -speed * dt);
+                if (keys['KeyA']) player.position.addScaledVector(side, -speed * dt);
+                if (keys['KeyD']) player.position.addScaledVector(side, speed * dt);
+            } else {
+                player.position.addScaledVector(dir, moveVec.y * speed * dt);
+                player.position.addScaledVector(side, moveVec.x * speed * dt);
+            }
+            
+            // Çarpışma
+            const pBox = new THREE.Box3().setFromCenterAndSize(player.position, new THREE.Vector3(0.8, 2, 0.8));
+            for(let wall of walls) if(pBox.intersectsBox(wall)) player.position.copy(oldPos);
+
+            sync();
+            composer.render();
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
